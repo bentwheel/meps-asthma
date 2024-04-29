@@ -72,7 +72,7 @@ process_fyc_data <- function(fyc_data, year) {
                     paste0("RXEXP", year_suffix), paste0("TOTEXP", year_suffix), 
                     paste0("RXTOT", year_suffix), "VARSTR", "VARPSU", 
                     paste0("PERWT", year_suffix, "F"), "ASTHDX", 
-                    "ASATAK31", "ASDALY31", "ASTHEP31", "ASTHAGED")
+                    "ASATAK31", "ASDALY31", "ASTHEP31", "ASSTIL31", "ASTHAGED")
   
   # Select the specified columns and rename them to end with 'YY'
   fyc_data %>%
@@ -145,8 +145,8 @@ fyc_w_desc <- fyc_processed %>%
   arrange(RACETHX) %>% 
   mutate(RACETHX_DSC = forcats::fct_inorder(RACETHX_DSC)) %>% 
   mutate(POVLEV_DSC = case_when(POVLEVYY < 100 ~ "Less than 100%",
-                              POVLEVYY >= 100 & POVLEVYY < 138 ~ "100% to less than 138%",
-                              POVLEVYY >= 138 & POVLEVYY < 150 ~ "138% to less than 150%",
+                              POVLEVYY >= 100 & POVLEVYY < 150 ~ "100% to less than 150%",
+                              # POVLEVYY >= 138 & POVLEVYY < 150 ~ "138% to less than 150%",
                               POVLEVYY >= 150 & POVLEVYY < 400 ~ "150% to less than 400%",
                               POVLEVYY >= 400 ~ "400% or more",
                               T ~ as.character(POVLEVYY))) %>% 
@@ -155,7 +155,17 @@ fyc_w_desc <- fyc_processed %>%
   mutate(ASTHDX_DSC = case_when(ASTHDX == 1 ~ "Diagnosed with asthma", 
                               ASTHDX == 2 ~ "Not diagnosed with asthma", 
                               T ~ "Unknown or Inapplicable")) %>% 
-  mutate(ASTHDX_DSC = forcats::fct_inorder(ASTHDX_DSC, ordered=T)) 
+  mutate(ASTHDX_DSC = forcats::fct_inorder(ASTHDX_DSC, ordered=T)) %>% 
+  mutate(ASATAK31_DSC = case_when(
+    ASATAK31 == -8 ~ "Don't Know",
+    ASATAK31 == -7 ~ "Refused",
+    ASATAK31 == -1 ~ "Inapplicable",
+    ASATAK31 == 1 ~ "Yes",
+    ASATAK31 == 2 ~ "No",
+    TRUE ~ as.character(ASATAK31))) %>%  # Handling potential unexpected values
+  arrange(ASATAK31) %>%
+  mutate(ASATAK31_DSC = forcats::fct_inorder(ASATAK31_DSC))
+
 
 # Now we create the survey object and use this to build basic survey data tables
 pooled_svydsgn <- fyc_w_desc %>% 
@@ -168,14 +178,141 @@ pooled_svydsgn <- fyc_w_desc %>%
 
 # Using the srvyr package, we can interact with the survey design object using dyplr-like verbs for subsetting and performing estimates of key statistics (means, quantiles, proportions, etc.) on by-groups.
 
+# Set Custom Pallette
+#cp <- c('#a6cee3','#1f78b4','#b2df8a','#33a02c')
+cp <- rev(c('#d7191c','#fdae61','#ffffbf','#abd9e9','#2c7bb6'))
+
 # Asthma diagnoses by age group
 asthma_by_age.data <- pooled_svydsgn %>% 
-  filter(AGELAST > 0,
-         POOLWT > 0) %>%  # To avoid warning, does not change results
-  group_by(AGE_GRP_5, SEX_DSC, ASTHDX_DSC) %>% 
-  summarize(asthma_diag_prop = survey_prop(vartype=c("se", "ci"))) %>% 
+  srvyr::filter(ASSTIL31 == 1, # Narrow down to people who indicate they *still* have asthma
+                POOLWT > 0) %>%  # To avoid warning, does not change results
+  srvyr::group_by(AGE_GRP_9, SEX_DSC, ASTHDX_DSC) %>% 
+  srvyr::summarize(asthma_diag_total = srvyr::survey_total(vartype=c("se", "ci"))) %>% 
   as_tibble() %>%  #convert back to tibble so we can use ordinary dplyr verbs and not srvyr verbs
-  mutate(rse = asthma_diag_prop_se / asthma_diag_prop) %>% 
+  mutate(rse = asthma_diag_total_se / asthma_diag_total) %>%  # Check against high RSE values
   filter(ASTHDX_DSC != "Unknown or Inapplicable")
 
+# Basic graph
+asthma_by_age.plot <- asthma_by_age.data %>% 
+  filter(ASTHDX_DSC == "Diagnosed with asthma") %>% 
+  ggplot(mapping = aes(x = AGE_GRP_9, y = asthma_diag_total, fill = SEX_DSC)) +
+  geom_bar(stat = "identity", position = "dodge", color="black", size = .2) +
+  scale_color_manual(values = c(error = "black"), labels = c("error" = "Error bars denote 95% CI")) +
+  geom_errorbar(aes(color = "error", ymin = asthma_diag_total_low, ymax = asthma_diag_total_upp), position = position_dodge(.9), width = .2) +
+  scale_y_continuous(labels = scales::comma_format()) +
+  scale_fill_manual(values= cp) +
+  theme_light() +
+  labs(title = str_wrap("1. Asthma affects men and women differently across age groups.", width = 100),
+    subtitle = str_wrap("According to Medical Expenditure Panel Survey (MEPS) data pooled over 2018 - 2021, asthma prevalence rates are higher in males than in females among children, but are higher in females than in males in early adulthood and beyond. An article discussing the sex and gender differences in asthma attributes the shift in global asthma prevalence rates in males and females across age groups to \"a role of sex hormones and a complex interplay of socioeconomic factors, differential access to resources (e.g. nutrition and air quality), comorbidities and healthcare in developing versus developed countries.\" †", width = 120),
+    x = "Age Group",
+    y = "Estimated number of people with asthma",
+    fill = "Gender",
+    caption = str_wrap("† Chowdhury, N. U., Guntur, V. P., Newcomb, D. C., & Wechsler, M. E. (2021). Sex and gender in asthma. European respiratory review : an official journal of the European Respiratory Society, 30(162), 210067. https://doi.org/10.1183/16000617.0067-2021", width = 150)
+  ) +
+  theme(legend.position = "bottom",
+        plot.caption = element_text(hjust = 0)) + # Left-justify the caption
+  guides(color = guide_legend(title = NULL))  # Remove title from color legend
 
+asthma_by_age.plot %>% ggsave(file = "./asthma_plot_1.png", width = 12, height = 7)
+
+# "Asthma is a heterogenous disease, and its prevalence and severity are different in males versus females through various ages. As children, boys have an increased prevalence of asthma. As adults, women have an increased prevalence and severity of asthma."
+# source: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8783601/
+
+# "This shift in asthma prevalence in males and females over time suggests a role of sex hormones and a complex interplay of socioeconomic factors, differential access to resources (e.g. nutrition and air quality), comorbidities ..."
+
+# Asthma diagnosis by income level
+asthma_by_povlev.data <- pooled_svydsgn %>% 
+  srvyr::filter(POOLWT > 0) %>%  # To avoid warning, does not change results
+  srvyr::group_by(AGE_GRP_3, POVLEV_DSC, ASSTIL31) %>% 
+  srvyr::summarize(asthma_diag_prop = srvyr::survey_prop(vartype=c("se", "ci"))) %>% 
+  as_tibble() %>%  #convert back to tibble so we can use ordinary dplyr verbs and not srvyr verbs
+  mutate(rse = asthma_diag_prop_se / asthma_diag_prop) %>% 
+  filter(ASSTIL31 == 1)
+
+# Basic graph
+asthma_by_povlev.plot <- asthma_by_povlev.data %>% 
+  ggplot(mapping = aes(x = AGE_GRP_3, y = asthma_diag_prop, fill = POVLEV_DSC)) +
+  geom_bar(stat = "identity", position = "dodge", color="black", size = .2) +
+  geom_errorbar(aes(color = "error", ymin = asthma_diag_prop_low, ymax = asthma_diag_prop_upp), position = position_dodge(.9), width = .2) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_color_manual(values = c(error = "black"), labels = c("error" = "Error bars denote 95% CI")) +
+  scale_fill_manual(values= cp) +
+  theme_light() +
+  labs(title = str_wrap("2. Socioeconomic factors have an influence on rates of asthma prevalence.", width = 100),
+       subtitle = str_wrap("According to Medical Expenditure Panel Survey (MEPS) data pooled over 2018 - 2021, asthma prevalence is highest in populations with family incomes below the Federal Poverty Level (FPL). According to a report published by the New York City Department of Health, the connection between poverty and higher rates of asthma prevalence is due, in part, to reduced access to high-quality health care and \"a shortage of healthy housing in poor neighborhoods [where] people experience a range of housing conditions like mold, pests, and leaks that trigger asthma and make it worse.\" †", width = 120),
+       x = "Age Group",
+       y = "Estimated asthma prevalence",
+       fill = str_wrap("Family income as a percent of the Federal Poverty Line", width = 20),
+       caption = str_wrap("† New York City Department of Health and Mental Hygiene. (2019). Why Asthma is a Social Justice Issue. Retrieved from https://a816-dohbesp.nyc.gov/IndicatorPublic/data-stories/povasthma/", width=150)) +
+  theme(plot.caption = element_text(hjust = 0)) + # Left-justify the caption 
+  guides(color = guide_legend(title = NULL))  # Remove title from color legend
+
+asthma_by_povlev.plot %>% ggsave(file = "./asthma_plot_2.png", width = 12, height = 7)
+
+# Asthma diagnoses by race / ethnicity
+
+asthma_by_race.data <- pooled_svydsgn %>% 
+  srvyr::filter(POOLWT > 0) %>%  # To avoid warning, does not change results
+  srvyr::group_by(AGE_GRP_2, RACETHX_DSC, ASSTIL31) %>% 
+  srvyr::summarize(asthma_diag_prop = srvyr::survey_prop(vartype=c("se", "ci"))) %>% 
+  as_tibble() %>%  #convert back to tibble so we can use ordinary dplyr verbs and not srvyr verbs
+  mutate(rse = asthma_diag_prop_se / asthma_diag_prop) %>% 
+  filter(ASSTIL31 == 1)
+
+# Basic graph
+asthma_by_race.plot <- asthma_by_race.data %>% 
+  ggplot(mapping = aes(x = AGE_GRP_2, y = asthma_diag_prop, fill = reorder(RACETHX_DSC, asthma_diag_prop))) +
+  geom_bar(stat = "identity", position = "dodge", color="black", size = .2) +
+  geom_errorbar(aes(color = "error", ymin = asthma_diag_prop_low, ymax = asthma_diag_prop_upp), position = position_dodge(.9), width = .2) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_color_manual(values = c(error = "black"), labels = c("error" = "Error bars denote 95% CI")) +
+  scale_fill_manual(values= cp) +
+  theme_light() +
+  labs(title = str_wrap("3. Asthma prevalence rates vary across populations with differing racial and ethnic identities.", width = 100),
+       subtitle = str_wrap("According to MEPS data pooled over 2018 - 2021, asthma prevalence rates are highest generally among non-Hispanic Black populations and lowest in non-Hispanic Asian populations. The differences in asthma prevalence rates across racial and ethnic identities are attributable in part to the air quality in environments where these populations tend to reside, with non-Hispanic Black populations more commonly living in cities and thus exposed to asthma risk factors that differ from those encountered by individuals who live in suburban or rural environments. †", width =120),
+       x = "Age Group",
+       y = "Estimated asthma prevalence",
+       fill = str_wrap("Race & Ethnicity", width = 20),
+       caption = str_wrap("† National Heart, Lung, and Blood Institute. (May 2023). Asthma in the Black community [Fact sheet]. Retrieved from https://www.nhlbi.nih.gov/sites/default/files/publications/asthma_in_black_community_fact_sheet.pdf", width=150)) +
+  theme(plot.caption = element_text(hjust = 0)) + # Left-justify the caption 
+  guides(color = guide_legend(title = NULL))  # Remove title from color legend
+
+asthma_by_race.plot %>% ggsave(file = "./asthma_plot_3.png", width = 12, height = 7)
+
+# Average cost difference between folks with Asthma diagnosis vs. those without
+asthma_expenditures_by_diag.data <- pooled_svydsgn %>% 
+  srvyr::filter(POOLWT > 0) %>%  # To avoid warning, does not change results
+  srvyr::group_by(AGE_GRP_3, ASTHDX_DSC) %>% 
+  srvyr::summarize(mean_tot_exp = srvyr::survey_mean(TOTEXPYY, vartype=c("se", "ci")),
+                   mean_rx_exp = srvyr::survey_mean(RXEXPYY, vartype=c("se", "ci"))) %>% 
+  as_tibble() %>%   #convert back to tibble so we can use ordinary dplyr verbs and not srvyr verbs
+  mutate(mean_tot_exp_rse = mean_tot_exp_se / mean_tot_exp,
+         mean_rx_exp_rse = mean_rx_exp_se / mean_rx_exp) %>% 
+  group_by(AGE_GRP_3, ASTHDX_DSC) %>%   
+  pivot_longer(names_to = "key", values_to = "value", cols = starts_with("mean")) %>% 
+  filter(!str_detect(key, "_se") & !str_detect(key, "_rse")) %>% 
+  mutate(EXP_TYPE = if_else(str_detect(key, "_tot_"), "Total Healthcare Spend", "RX Spend Only"),
+         key = if_else(str_detect(key, "_upp"), "hi", if_else(str_detect(key, "_low"), "lo", "est"))) %>% 
+  pivot_wider(names_from = "key", values_from = "value")
+
+# Basic plot
+asthma_expenditures_by_diag.plot <- asthma_expenditures_by_diag.data %>% 
+  filter(ASTHDX_DSC != "Unknown or Inapplicable") %>% 
+  ggplot(mapping = aes(x = AGE_GRP_3, y = est, fill = ASTHDX_DSC)) +
+  geom_bar(stat = "identity", position = "dodge", color="black", linewidth = .2) +
+  geom_errorbar(aes(color = "error", ymin = lo, ymax = hi), position = position_dodge(.9), width = .2) +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  scale_color_manual(values = c(error = "black"), labels = c("error" = "Error bars denote 95% CI")) +
+  scale_fill_manual(values= cp) +
+  theme_light() +
+  labs(title = str_wrap("4. Individuals with a current or previous asthma diagnosis have higher healthcare expenses, on average, than individuals who have never received an asthma diagnosis.", width = 100),
+       subtitle = str_wrap("According to MEPS data pooled over 2018 - 2021, across all age groups, individuals who have ever received an asthma diagnosis at any point in the past have higher total healthcare expenditures and RX-only expenditures, on average, than individuals who have never received an asthma diagnosis in the past.", width =120),
+       x = "Age Group",
+       y = "Estimated average annual expenditures, per person",
+       fill = str_wrap("Ever diagnosed with asthma at any time in the past?", width = 20)
+  ) +
+  facet_grid(EXP_TYPE~., scales = "free_y") +
+  theme(plot.caption = element_text(hjust = 0)) + # Left-justify the caption 
+  guides(color = guide_legend(title = NULL))  # Remove title from color legend
+
+asthma_expenditures_by_diag.plot %>% ggsave(file = "./asthma_plot_4.png", width = 12, height = 7)
